@@ -1,0 +1,9 @@
+.skill/
+.cursor/rules/skill-context.md
+.windsurf/rules/skill-context.md
+.claude/commands/
+
+target/
+
+# 导出的会话 JSON（单个可达数百 MB，不入库）
+exports/
