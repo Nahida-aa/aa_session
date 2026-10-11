@@ -1,4 +1,4 @@
-# aa_session
+# aa-session
 
 列出并导出本地 agent 会话。**v1 只做只读列举 + JSON 导出。**
 
@@ -20,19 +20,21 @@
 `--app` **必填**（放在子命令前后都行），不猜目标 app。
 
 ```bash
-aa_session --app opencode projects   [--min-sessions N] [--json]
-aa_session --app opencode directories [--directory SUB] [--min-sessions N] [--json]
-aa_session --app opencode sessions   [--project ABS_PATH | --project-like SUB]
+aa-session --app opencode projects   [--min-sessions N] [--json]
+aa-session --app opencode directories [--directory SUB] [--min-sessions N] [--json]
+aa-session --app opencode sessions   [--project ABS_PATH | --project-like SUB]
                                     [--directory SUB] [--agent NAME]...
                                     [--title SUB] [--since MINUTES]
                                     [--subagents exclude|include|only]
                                     [--archived exclude|only|include]
-                                    [--sort updated|created|title|tokens] [--limit N] [--json]
-aa_session --app opencode show   <SESSION_ID> [--with-tool-output] [--with-reasoning] [--max-tool-output N]
-aa_session --app opencode export <SESSION_ID> [-o PATH] [--force] [导出选项同上]
+                                    [--sort updated|created|title|tokens] [--limit N]
+                                    [--format table|json|toon]
+aa-session --app opencode show   <SESSION_ID> [--with-tool-output] [--with-reasoning] [--max-tool-output N]
+aa-session --app opencode export <SESSION_ID> [-o PATH] [--force] [导出选项同上]
 ```
 
 - 表格里**不显示来源列**：`--app` 参数已经说明了是哪个 app。
+- `--format` 默认 `table`；`--json` 是 `--format json` 的简写（保留旧用法）。
 
 ### 项目寻址：`--project` 精确，`--project-like` 模糊
 
@@ -51,6 +53,61 @@ aa_session --app opencode export <SESSION_ID> [-o PATH] [--force] [导出选项�
 3. **`/` 是占位符不是真实路径**，显示为「（未知）」。opencode 为「无法确定所属
    仓库」的会话建了名为 `global` 的项目、worktree 填 `/`，那 10 条顶层会话散落
    在多个目录。用 `is_unknown_path()` 判断，别直接和 `"/"` 字符串比较。
+
+### 三种输出格式，各司其职
+
+| 格式 | 解决什么 | 谁看 |
+|---|---|---|
+| `table`（默认） | 视觉对齐，纵向扫一列对比数字最省力 | 人眼 |
+| `toon` | 省 token：表头写一次键名，行内只写值 | AI / token 敏感 |
+| `json` | 通用管道（`jq`）、生态兼容 | 脚本、既有工作流 |
+
+**TOON 不是表格的替代品**（Token-Oriented Object Notation，给 LLM 用的紧凑
+序列化）。它输出人也能读，但**列不对齐**，扫一列比分隔符列表费劲；反过来表格
+对 AI 极不友好——数字带千分位和前后空格。两者解的是不同问题。
+
+实测 30 条会话：`json 4366` → `toon 2267`，**省 48%**（省的是重复的键名；
+字段越长越散省得越少）。`table 1189` 看着更小，但它是**有损的**——路径和 id
+被截断过，不参与这个比较。
+
+⚠️ `toon-format` 的 `default = ["cli"]` 会拖进 ratatui / crosstrm /
+tui-textarea / arboard / syntect（那是它自己交互式 TUI 编辑器的依赖）。
+已用 `default-features = false` 只取编解码库。
+⚠️ 直接加它会和 comfy-table 抢 `unicode-width`：ratatui 钉 `=0.2.0`、
+comfy-table 要 `0.2`。我们的直接依赖必须写 `"0.2"` 而不是 `"0.2.2"`。
+
+### 表格输出：用 comfy-table，一条记录一行
+
+**每条会话只占一行**，路径各自独立成列：
+
+```
+ 会话 ID         时间               tokens  agent    成本  标题                    会话目录                   项目目录
+ ses_f04a8780…  2026-10-02 06:40       0  build     -  New session - 2026-…   /home/aa/repos/ai_ls/…    /home/aa/repos/ai_ls/ocr-lab
+↳ses_fc6bb114…  2026-08-25 14:14    4.2万  explore   -  Investigate drag a…   /home/aa/repos/ide_ls/…
+```
+
+- 用 [`comfy_table`]（8.x，`tty` feature）而非手写 `{:>6}`：**Rust 的
+  `str::len()` 按字节算**，中文标题必然导致列错位；comfy-table 用
+  `unicode-width` 按显示列宽算，并处理终端宽度自适应。手写的 `{:>N}` 在这里
+  是错的，不是「不够优雅」。
+- 样式用 `presets::NOTHING`：只留表头下横线。891 行画 891 个框，噪声压过信息。
+- **路径从左侧截断**（`…/env_ls/LocalDub`）：这些路径共享很长的前缀，尾部才是
+  区分信息；砍尾部会让所有行看起来一样。标题相反，从**右侧**截断。
+- 会话 id 只显示前 12 位（`table::short_id`），全量打印会撑宽 28 列。
+- `↳` 前缀标记子会话，`⊘` 标记归档。
+
+### `sessions` 里两个目录都要显示
+
+- `会话目录` = `session_v2.directory`（运行目录），**总是显示**；
+- `项目目录` = `project.worktree`（git 仓库根），相同时写「**同左**」。
+  默认口径下有 **28 条**不一致（跑在子目录 / 跑在另一个仓库 / `global` 兜底桶）。
+
+  ⚠️ 之前这里**留空**，是错的：空单元格看起来像「数据缺失」，而不是
+  「和左边一样」。已改为显式的「同左」。
+
+`/` 兜底桶在 `projects` 和 `sessions` 两个视图里都显示成「（未知）」，判断逻辑
+收敛到 `ProjectMeta::is_unknown_path` / `SessionMeta::is_unknown_project`，共用
+`UNKNOWN_PROJECT_PATH` 常量（有单测盯住，防止两个视图对同一兜底桶显示不一致）。
 
 ### `projects` 与 `directories` 是两个视图，不是重复
 
@@ -79,7 +136,7 @@ aa_session --app opencode export <SESSION_ID> [-o PATH] [--force] [导出选项�
 
 ### CLI 输出必须容忍 broken pipe
 
-`println!` 遇写错误会 `panic!`，于是 `aa_session ... | head -5` 会炸出
+`println!` 遇写错误会 `panic!`，于是 `aa-session ... | head -5` 会炸出
 `failed printing to stdout: Broken pipe`。已统一改用 `output::out()`：忽略写错误，
 并**手动补换行**（`format_args!` 不像 `println!` 那样自动加换行）。
 
@@ -116,7 +173,7 @@ aa_session --app opencode export <SESSION_ID> [-o PATH] [--force] [导出选项�
 
 | 配方                      | 用途                                                        |
 | ------------------------- | ----------------------------------------------------------- |
-| `just projects [过滤]`    | 列出项目（等价 `aa_session --app opencode projects`）       |
+| `just projects [过滤]`    | 列出项目（等价 `aa-session --app opencode projects`）       |
 | `just sessions [过滤]`    | 列出会话                                                    |
 | `just export <ID> [路径]` | 导出会话，不给路径时落到 `exports/<ID>.json`                |
 | `just zed <ID> [路径]`    | 导出后直接用 Zed 打开                                       |
@@ -240,12 +297,10 @@ apps/cli/          clap 入口
   opencode 的 `session_v2` 虽有 `fork_session_id` / `fork_boundary` 字段，
   实测**全库 0 条使用**（652 条 `parent_id` 是子 agent 派生，不是 fork）。
 
-## 下一步
+## 路线图
 
-1. `fork`（`--at <seq>`）—— fork-first，复制出新会话
-2. 多数据源：Claude Code、Codex
-3. 批量导出（`export --project X --all`），方便一次性倒进 Zed 搜
-4. GUI（届时讨论复用 `gpui_learn` 还是自锁 zed rev）
+见 [`ROADMAP.md`](ROADMAP.md)（任务列表树维护）。下一步是 v2 的写操作
+（`fork --at <seq>` / `edit`），前置约束见下节。
 
 ## 开发
 

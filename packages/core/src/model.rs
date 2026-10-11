@@ -111,6 +111,14 @@ impl SessionMeta {
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
     }
+
+    /// 归属项目是否为「未知」兜底桶（opencode 用 `/` 表示无法确定所属仓库）。
+    ///
+    /// 与 [`ProjectMeta::is_unknown_path`] 共用同一常量，避免两处各写一遍
+    /// 字符串比较而走偏。
+    pub fn is_unknown_project(&self) -> bool {
+        self.project_path == UNKNOWN_PROJECT_PATH
+    }
 }
 
 /// 一条消息在会话中的角色 / 种类。
@@ -285,5 +293,67 @@ mod project_meta_tests {
         assert!(!meta("").is_unknown_path());
         // 双斜杠开头的变体不应被误判成未知
         assert!(!meta("//").is_unknown_path());
+    }
+}
+
+#[cfg(test)]
+mod session_meta_project_tests {
+    use super::*;
+
+    #[test]
+    fn slash_project_path_is_unknown_bucket() {
+        let mut m = session_meta();
+        m.project_path = UNKNOWN_PROJECT_PATH.to_string();
+        assert!(m.is_unknown_project());
+    }
+
+    #[test]
+    fn real_project_path_is_not_unknown() {
+        let mut m = session_meta();
+        m.project_path = "/home/aa/repos".to_string();
+        assert!(!m.is_unknown_project());
+    }
+
+    #[test]
+    fn session_and_project_share_the_unknown_sentinel() {
+        // 两个类型必须用同一个常量，否则 projects 显示「未知」而 sessions 显示
+        // 「/」，同一个兜底桶在两个视图里长得不一样。
+        let p = ProjectMeta {
+            app: "opencode".into(),
+            id: "p".into(),
+            path: UNKNOWN_PROJECT_PATH.to_string(),
+            vcs: None,
+            session_count: 0,
+            subagent_count: 0,
+            archived_count: 0,
+            time_active: None,
+        };
+        let mut s = session_meta();
+        s.project_path = p.path.clone();
+
+        assert!(p.is_unknown_path());
+        assert!(s.is_unknown_project());
+    }
+
+    fn session_meta() -> SessionMeta {
+        SessionMeta {
+            app: "opencode".into(),
+            id: "s".into(),
+            project_id: "p".into(),
+            project_path: "/tmp".into(),
+            parent_id: None,
+            title: String::new(),
+            directory: "/tmp".into(),
+            agent: None,
+            model: None,
+            time_created: 0,
+            time_updated: 0,
+            tokens_input: 0,
+            tokens_output: 0,
+            tokens_reasoning: 0,
+            cost: None,
+            files_changed: 0,
+            archived_at: None,
+        }
     }
 }

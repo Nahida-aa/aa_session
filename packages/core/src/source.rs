@@ -88,6 +88,57 @@ pub enum ProjectSelector {
     All,
 }
 
+/// 空壳会话（一条消息都没有）的纳入方式。
+///
+/// opencode 会为「打开过但从未真正使用」的会话建行：0 消息、0 token，标题是
+/// `New session - <ISO 时间戳>`。opencode 自己的 UI 不显示它们，我们**也默认
+/// 不显示**——否则列表里混着 21% 点不开、导不出、也没法 fork 的空行。
+///
+/// 实测顶层未归档会话 222 条里有 **46 条**是空壳。没有任何字段能区分它们
+/// （`time_viewed` / `time_idle` / `idle_outcome` 在空壳和真会话上都是 NULL），
+/// 唯一可靠信号是**消息数为 0**，所以只能用 `NOT EXISTS`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmptySessions {
+    /// 排除空壳会话（默认）。
+    #[default]
+    Exclude,
+    /// 只显示空壳会话。
+    Only,
+    /// 空壳与正常会话都显示。
+    Include,
+}
+
+impl EmptySessions {
+    /// 该模式对应的 SQL 片段（无绑定参数）。
+    ///
+    /// 空壳判定用 `session_message`（v2 schema）—— v2 里一条会话没有
+    /// 消息意味着它是占位符。
+    pub fn sql_filter(self) -> &'static str {
+        match self {
+            EmptySessions::Exclude => " AND EXISTS (SELECT 1 FROM session_message m \
+                                       WHERE m.session_id = s.id)",
+            EmptySessions::Only => " AND NOT EXISTS (SELECT 1 FROM session_message m \
+                                   WHERE m.session_id = s.id)",
+            EmptySessions::Include => "",
+        }
+    }
+
+    /// 同 [`Self::sql_filter`]，但用 v1 的 `message` 表判定空壳。
+    ///
+    /// 为什么需要两个版本：`session`（v1）的会话，消息在 `message` 表；
+    /// `session_v2`（v2）的会话，消息在 `session_message` 表。同一库两套
+    /// schema 并存，空壳判定必须跟着各自的消息表走。
+    pub fn sql_filter_v1(self) -> &'static str {
+        match self {
+            EmptySessions::Exclude => " AND EXISTS (SELECT 1 FROM message m \
+                                       WHERE m.session_id = s.id)",
+            EmptySessions::Only => " AND NOT EXISTS (SELECT 1 FROM message m \
+                                   WHERE m.session_id = s.id)",
+            EmptySessions::Include => "",
+        }
+    }
+}
+
 /// 会话列表的过滤条件。
 ///
 /// 所有条件以 `AND` 叠加，空值表示「不限制」。
@@ -107,6 +158,8 @@ pub struct SessionFilter {
     pub subagents: Subagents,
     /// 归档会话的纳入方式。
     pub archived: Archived,
+    /// 空壳会话（0 消息）的纳入方式。
+    pub empty: EmptySessions,
     /// 最多返回多少条。
     pub limit: usize,
 }

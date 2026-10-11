@@ -28,7 +28,7 @@
 //! 见 [`under_prefix`]。
 
 use aa_session_core::Result;
-use rusqlite::{Connection, ToSql, params};
+use rusqlite::{Connection, ToSql};
 use tracing::info;
 
 /// 改名会影响的行数统计。
@@ -180,6 +180,7 @@ fn refs(values: &[String]) -> Vec<&dyn ToSql> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
 
     /// 建一个只有 project / session_v2 / session 三张表的内存库。
     fn fixture() -> Connection {
@@ -291,7 +292,7 @@ mod tests {
 
     #[test]
     fn plan_reports_row_counts_without_writing() {
-        let mut conn = fixture();
+        let conn = fixture();
         add(&conn, "project", "p1", "/a/b");
         add(&conn, "session_v2", "m1", "/a/b/x");
         add(&conn, "session", "o1", "/a/b/y");

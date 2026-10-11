@@ -7,7 +7,7 @@
 /// 安全打印到 stdout：写失败（含管道被关闭）时静默忽略。
 ///
 /// 不能用 `println!`：它对写错误会 `panic!`，于是
-/// `aa_session ... | head -5` 这种正常用法会炸出
+/// `aa-session ... | head -5` 这种正常用法会炸出
 /// `failed printing to stdout: Broken pipe`。
 ///
 /// 忽略写错误对 CLI 是正确行为 —— 管道下游（`head`、`less`）提前退出时，
@@ -21,12 +21,13 @@ pub(crate) fn out(args: std::fmt::Arguments<'_>) {
 }
 
 use aa_session_core::{DirectoryMeta, ProjectMeta, SessionMeta};
-use anyhow::Result;
 
-/// 字符串的显示宽度（CJK 记 2 列）。
-fn str_width(s: &str) -> usize {
-    s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
-}
+use crate::format::Format;
+use crate::table;
+
+/// 路径列的显示宽度上限（显示列宽，非字符数）。
+const PATH_W: usize = 52;
+use anyhow::Result;
 
 /// 人类可读的体积。
 pub(crate) fn human_bytes(bytes: u64) -> String {
@@ -42,28 +43,6 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{v:.1} {}", UNITS[i])
     }
-}
-
-/// 按显示宽度截断，超出时以 `…` 结尾。
-fn truncate(s: &str, max: usize) -> String {
-    let mut out = String::new();
-    let mut w = 0usize;
-    for c in s.chars() {
-        let cw = if c.is_ascii() { 1 } else { 2 };
-        if w + cw > max.saturating_sub(1) {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out
-}
-
-/// 按显示宽度左侧补空格。
-fn pad(s: &str, width: usize) -> String {
-    let w = str_width(s);
-    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
 }
 
 /// Unix 毫秒 → `YYYY-MM-DD HH:MM`。
@@ -108,9 +87,9 @@ fn human_tokens(n: i64) -> String {
 }
 
 /// 打印项目列表。
-pub fn print_projects(rows: &[ProjectMeta], as_json: bool) -> Result<()> {
-    if as_json {
-        out(format_args!("{}", serde_json::to_string_pretty(rows)?));
+pub fn print_projects(rows: &[ProjectMeta], fmt: Format) -> Result<()> {
+    if let Some(rendered) = fmt.render(rows)? {
+        out(format_args!("{rendered}"));
         return Ok(());
     }
 
@@ -119,33 +98,30 @@ pub fn print_projects(rows: &[ProjectMeta], as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // 「会话」列只数顶层会话（与 `sessions` 默认行为一致），子会话数单列。
-    // 不显示来源列 —— `--app` 参数已经说明了是哪个 app。
-    out(format_args!(
-        "{:>6}  {:>6}  {:<16}  项目路径",
-        "会话", "子会话", "最近活跃"
-    ));
+    let mut t = table::build(&["会话", "子会话", "归档", "最近活跃", "项目路径"]);
 
     for p in rows {
         // opencode 用字面量 "/" 表示「无法确定所属仓库」，显示成「未知」，
         // 否则用户会以为有个项目挂在根目录上。
         let path = if p.is_unknown_path() {
-            "（未知）"
+            "（未知）".to_string()
         } else if p.path.is_empty() {
-            "(无目录)"
+            "(无目录)".to_string()
         } else {
-            &p.path
+            // 路径从左侧截断：尾部才是区分信息。
+            table::ellipsize_left(&p.path, PATH_W)
         };
-        out(format_args!(
-            "{:>6}  {:>6}  {:>6}  {:<16}  {}",
-            p.session_count,
-            p.subagent_count,
-            p.archived_count,
-            fmt_time(p.time_active.unwrap_or(0)),
-            truncate(path, 70)
-        ));
+
+        t.add_row(vec![
+            table::cell(p.session_count),
+            table::cell(p.subagent_count),
+            table::cell(p.archived_count),
+            table::cell(fmt_time(p.time_active.unwrap_or(0))),
+            table::cell(path),
+        ]);
     }
 
+    out(format_args!("{}", table::render(t)));
     out(format_args!("\n共 {} 个项目", rows.len()));
     Ok(())
 }
@@ -160,9 +136,9 @@ fn cost_str(cost: Option<f64>) -> String {
 }
 
 /// 打印会话运行目录列表。
-pub fn print_directories(rows: &[DirectoryMeta], as_json: bool) -> Result<()> {
-    if as_json {
-        out(format_args!("{}", serde_json::to_string_pretty(rows)?));
+pub fn print_directories(rows: &[DirectoryMeta], fmt: Format) -> Result<()> {
+    if let Some(rendered) = fmt.render(rows)? {
+        out(format_args!("{rendered}"));
         return Ok(());
     }
 
@@ -171,31 +147,27 @@ pub fn print_directories(rows: &[DirectoryMeta], as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // 「项目数」列大于 1 说明有会话跑在了不属于本项目的位置 —— opencode 的
-    // 已知行为，不是 bug，但对排查有用，所以显式列出来。
-    out(format_args!(
-        "{:>6}  {:>6}  {:<16}  目录",
-        "会话", "项目数", "最近活动"
-    ));
+    let mut t = table::build(&["会话", "项目数", "最近活动", "目录"]);
+    table::right_align(&mut t, &[0, 1]);
 
     for d in rows {
-        out(format_args!(
-            "{:>6}  {:>6}  {:<16}  {}",
-            d.session_count,
-            d.project_count,
-            fmt_time(d.time_updated),
-            truncate(&d.path, 60)
-        ));
+        t.add_row(vec![
+            table::cell(d.session_count),
+            table::cell(d.project_count),
+            table::cell(fmt_time(d.time_updated)),
+            table::cell(table::ellipsize_left(&d.path, PATH_W)),
+        ]);
     }
 
+    out(format_args!("{}", table::render(t)));
     out(format_args!("\n共 {} 个目录", rows.len()));
     Ok(())
 }
 
 /// 打印会话列表。
-pub fn print_sessions(rows: &[SessionMeta], as_json: bool) -> Result<()> {
-    if as_json {
-        out(format_args!("{}", serde_json::to_string_pretty(rows)?));
+pub fn print_sessions(rows: &[SessionMeta], fmt: Format) -> Result<()> {
+    if let Some(rendered) = fmt.render(rows)? {
+        out(format_args!("{rendered}"));
         return Ok(());
     }
 
@@ -204,51 +176,67 @@ pub fn print_sessions(rows: &[SessionMeta], as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    out(format_args!(
-        "{}  {}  {}  {:>8}  标题  ·  目录",
-        pad("时间", 16),
-        pad("tokens", 8),
-        pad("agent", 8),
-        pad("成本", 8),
-    ));
+    // 每条会话一行，路径各自独立成列 —— 之前把路径塞进附注行再折行，
+    // 结果一条会话占 2-3 行，几十行就滚过去了。
+    let mut t = table::build(&[
+        "会话 ID",
+        "时间",
+        "tokens",
+        "agent",
+        "成本",
+        "标题",
+        "会话目录",
+        "项目目录",
+    ]);
+    table::right_align(&mut t, &[2, 4]);
 
     for r in rows {
-        let tokens = human_tokens(r.tokens_input + r.tokens_output);
-        let title = truncate(&r.title.replace('\n', " "), 34);
-        let dir = r.directory.replace('\n', " ");
-        let mut label = if title.is_empty() { dir.clone() } else { title };
-        if !dir.is_empty() && !label.contains(&dir) && label.len() + dir.len() < 60 {
-            label.push_str("  ·  ");
-            label.push_str(&truncate(&dir, 24));
-        }
+        let title = table::ellipsize_right(&r.title.replace('\n', " "), TITLE_W);
 
-        out(format_args!(
-            "{}  {}  {}  {:>8}  {}",
-            pad(&fmt_time(r.time_updated), 16),
-            pad(&tokens, 8),
-            pad(r.agent.as_deref().unwrap_or("-"), 8),
-            pad(&cost_str(r.cost), 8),
-            label
-        ));
+        // 会话目录 = session_v2.directory（运行目录），总是显示。
+        let session_dir = table::ellipsize_left(&r.directory, PATH_W);
 
-        // 附注行：子会话标出父会话；归档的标出时间；再带上改动文件数和推理开销。
-        let mut notes: Vec<String> = Vec::new();
-        if let Some(parent) = &r.parent_id {
-            notes.push(format!("子会话 ← {parent}"));
+        // 项目目录 = project.worktree（git 仓库根）。与会话目录相同时只写「同左」，
+        // **不能留空** —— 空单元格看起来像「数据缺失」，而不是「和左边一样」。
+        let project_dir = if r.is_unknown_project() {
+            "（未知）".to_string()
+        } else if r.project_path == r.directory {
+            "同左".to_string()
+        } else {
+            table::ellipsize_left(&r.project_path, PATH_W)
+        };
+
+        let mut marks = String::new();
+        if r.parent_id.is_some() {
+            marks.push('↳');
         }
         if r.is_archived() {
-            notes.push(format!("已归档 {}", fmt_time(r.archived_at.unwrap_or(0))));
-        }
-        if r.files_changed > 0 {
-            notes.push(format!("改动 {} 个文件", r.files_changed));
-        }
-        if r.tokens_reasoning > 0 {
-            notes.push(format!("推理 {}", human_tokens(r.tokens_reasoning)));
+            marks.push('⊘');
         }
 
-        out(format_args!("      {}  {}", r.id, notes.join("  ·  ")));
+        t.add_row(vec![
+            table::cell(marks + &table::short_id(&r.id)),
+            table::cell(fmt_time(r.time_updated)),
+            table::cell(human_tokens(r.tokens_input + r.tokens_output)),
+            table::cell(r.agent.as_deref().unwrap_or("-")),
+            table::cell(cost_str(r.cost)),
+            table::cell(if title.is_empty() {
+                "(无标题)"
+            } else {
+                &title
+            }),
+            table::cell(session_dir),
+            table::cell(project_dir),
+        ]);
     }
 
-    out(format_args!("\n共 {} 条会话", rows.len()));
+    out(format_args!("{}", table::render(t)));
+    out(format_args!(
+        "\n共 {} 条会话（↳ 子会话，⊘ 已归档）",
+        rows.len()
+    ));
     Ok(())
 }
+
+/// 标题列的宽度上限。
+const TITLE_W: usize = 40;

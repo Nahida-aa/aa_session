@@ -1,17 +1,21 @@
-//! `aa_session` —— 列出并导出本地 agent 会话。
+//! `aa-session` —— 列出并导出本地 agent 会话。
 //!
 //! 设计前提：**不做全文搜索**。891 个会话的列举是一次 SQL 查询的事，而全文
 //! 检索交给用户在自己喜欢的编辑器里做——先把会话导出成可读 JSON，再用 Zed /
 //! IDE 的搜索。这样我们不必维护索引，也不必猜用户想要什么样的检索。
 
+mod format;
 mod output;
+mod table;
 
+use format::Format;
 use output::{human_bytes, out};
 
 use std::path::PathBuf;
 
 use aa_session_core::{
-    Archived, Error, ProjectSelector, SessionFilter, SessionSource, SortKey, Subagents,
+    Archived, EmptySessions, Error, ProjectSelector, SessionFilter, SessionSource, SortKey,
+    Subagents,
 };
 use aa_session_source_opencode::OpencodeSource;
 use aa_session_source_opencode::export::{ExportOptions, build};
@@ -23,7 +27,7 @@ use tracing_subscriber::EnvFilter;
 /// 顶层参数。
 #[derive(Debug, Parser)]
 #[command(
-    name = "aa_session",
+    name = "aa-session",
     version,
     about = "列出并导出本地 agent 会话",
     before_help = BEFORE_HELP
@@ -55,9 +59,9 @@ const BEFORE_HELP: &str = "\
 `--app` 是必填的 —— 本工具只读某个 agent 应用自己的存储，不猜目标。
 
 典型流程
-  1. 看看有哪些项目          aa_session --app opencode projects
-  2. 挑一个项目看会话        aa_session --app opencode sessions --project LocalDub
-  3. 导出会话                aa_session --app opencode export <SESSION_ID> -o chat.json
+  1. 看看有哪些项目          aa-session --app opencode projects
+  2. 挑一个项目看会话        aa-session --app opencode sessions --project LocalDub
+  3. 导出会话                aa-session --app opencode export <SESSION_ID> -o chat.json
   4. 在编辑器里全文搜索      zed chat.json        （或 code / vim / 任何工具）
 
 导出的 JSON 每条消息带一个裸文本 `text` 字段，可直接被编辑器的搜索命中。
@@ -79,7 +83,11 @@ enum Command {
         #[arg(short = 'n', long, value_name = "N")]
         min_sessions: Option<i64>,
 
-        /// 以 JSON 输出。
+        /// 输出格式。
+        #[arg(long, short = 'f', value_enum, default_value_t = Format::Table)]
+        format: Format,
+
+        /// 等价于 `--format json`（保留旧用法）。
         #[arg(long)]
         json: bool,
     },
@@ -126,11 +134,23 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ArchArg::Exclude, value_name = "MODE")]
         archived: ArchArg,
 
+        /// 空壳会话（一条消息都没有的占位会话）的纳入方式。
+        ///
+        /// opencode 会为「打开过但从未使用」的会话建行：0 消息、0 token，
+        /// 标题是 `New session - <ISO 时间戳>`。opencode 的 UI 不显示它们，
+        /// 我们默认也不显示。全库顶层未归档会话里 **21%** 是这种空壳。
+        #[arg(long, value_enum, default_value_t = EmptyArg::Exclude, value_name = "MODE")]
+        empty: EmptyArg,
+
         /// 排序键。
         #[arg(long, value_enum, default_value_t = SortArg::Updated)]
         sort: SortArg,
 
-        /// 以 JSON 输出。
+        /// 输出格式：`table`（对齐表格，给人扫）/ `json` / `toon`（省 token）。
+        #[arg(long, short = 'f', value_enum, default_value_t = Format::Table)]
+        format: Format,
+
+        /// 等价于 `--format json`（保留旧用法）。
         #[arg(long)]
         json: bool,
     },
@@ -173,7 +193,11 @@ enum Command {
         #[arg(short = 'n', long, value_name = "N")]
         min_sessions: Option<i64>,
 
-        /// 以 JSON 输出。
+        /// 输出格式。
+        #[arg(long, short = 'f', value_enum, default_value_t = Format::Table)]
+        format: Format,
+
+        /// 等价于 `--format json`（保留旧用法）。
         #[arg(long)]
         json: bool,
     },
@@ -294,6 +318,27 @@ impl From<ArchArg> for Archived {
     }
 }
 
+/// 空壳会话（0 消息）的纳入方式（对应 `aa_session_core::EmptySessions`）。
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EmptyArg {
+    /// 排除空壳会话（默认）—— opencode 的 UI 也不显示它们。
+    Exclude,
+    /// 只显示空壳会话。
+    Only,
+    /// 空壳与正常会话都显示。
+    Include,
+}
+
+impl From<EmptyArg> for EmptySessions {
+    fn from(v: EmptyArg) -> Self {
+        match v {
+            EmptyArg::Exclude => EmptySessions::Exclude,
+            EmptyArg::Only => EmptySessions::Only,
+            EmptyArg::Include => EmptySessions::Include,
+        }
+    }
+}
+
 /// 子 agent 会话的纳入方式（对应 `aa_session_core::Subagents`）。
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SubArg {
@@ -367,13 +412,17 @@ fn main() -> Result<()> {
     let source = app.open(cli.db.as_deref())?;
 
     match cli.command {
-        Command::Projects { min_sessions, json } => {
+        Command::Projects {
+            min_sessions,
+            format,
+            json,
+        } => {
             let projects = source.projects()?;
             let projects: Vec<_> = projects
                 .into_iter()
                 .filter(|p| min_sessions.is_none_or(|n| p.session_count >= n))
                 .collect();
-            output::print_projects(&projects, json)?;
+            output::print_projects(&projects, resolve_format(format, json))?;
         }
 
         Command::RenameProject {
@@ -397,6 +446,7 @@ fn main() -> Result<()> {
         Command::Directories {
             directory,
             min_sessions,
+            format,
             json,
         } => {
             let dirs = source.directories()?;
@@ -410,7 +460,7 @@ fn main() -> Result<()> {
                         .is_none_or(|n| d.path.to_lowercase().contains(n))
                 })
                 .collect();
-            output::print_directories(&dirs, json)?;
+            output::print_directories(&dirs, resolve_format(format, json))?;
         }
 
         Command::Sessions {
@@ -423,7 +473,9 @@ fn main() -> Result<()> {
             since,
             subagents,
             archived,
+            empty,
             sort,
+            format,
             json,
         } => {
             if project.is_some() && project_like.is_some() {
@@ -450,7 +502,7 @@ fn main() -> Result<()> {
                 // 空结果必须提示，否则用户会以为是「没有会话」而不是「没有项目」。
                 anyhow::bail!(
                     "没有路径包含 `{pattern}` 的项目；\
-                     先跑 `aa_session --app opencode projects` 看看有哪些。"
+                     先跑 `aa-session --app opencode projects` 看看有哪些。"
                 );
             }
 
@@ -463,11 +515,12 @@ fn main() -> Result<()> {
                 updated_after: since.map(minutes_ago_ms),
                 subagents: subagents.into(),
                 archived: archived.into(),
+                empty: empty.into(),
                 limit,
             };
 
             let sessions = source.sessions(&filter, sort.into())?;
-            output::print_sessions(&sessions, json)?;
+            output::print_sessions(&sessions, resolve_format(format, json))?;
         }
 
         Command::Show {
@@ -559,7 +612,7 @@ fn resolve_exact_project(source: &dyn SessionSource, input: &str) -> Result<Stri
         eprintln!(
             "提示：`/` 是 opencode 对「无法确定所属仓库」的占位值，对应 {n} 条顶层会话，散落在多个目录里。"
         );
-        eprintln!("要看具体目录，用 `aa_session --app opencode directories`。");
+        eprintln!("要看具体目录，用 `aa-session --app opencode directories`。");
     }
 
     // 存在性检查放在解析之后 —— 用 `projects()` 校验而不是额外的 SQL。
@@ -571,7 +624,7 @@ fn resolve_exact_project(source: &dyn SessionSource, input: &str) -> Result<Stri
     if !known {
         anyhow::bail!(
             "库中没有 worktree 为 `{path}` 的项目。\n\
-                        先跑 `aa_session --app opencode projects` 看看有哪些。"
+                        先跑 `aa-session --app opencode projects` 看看有哪些。"
         );
     }
 
@@ -669,7 +722,7 @@ fn run_rename_project(
     if old_ids.is_empty() {
         anyhow::bail!(
             "库中没有 worktree 为 `{old_path}` 的项目；\
-             先跑 `aa_session --app {} projects` 看看有哪些。",
+             先跑 `aa-session --app {} projects` 看看有哪些。",
             app.name()
         );
     }
@@ -750,6 +803,11 @@ fn run_rename_project(
     ));
 
     Ok(())
+}
+
+/// `--json` 是 `--format json` 的简写；两者同时给，`--json` 优先。
+fn resolve_format(format: Format, json_flag: bool) -> Format {
+    if json_flag { Format::Json } else { format }
 }
 
 /// `--project` / `rename-project` 共用的路径规范化。

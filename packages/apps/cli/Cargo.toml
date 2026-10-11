@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "aa_session"
+name = "aa-session"
 path = "src/main.rs"
 
 [dependencies]
@@ -13,7 +13,14 @@ aa_session_core = { workspace = true }
 aa_session_source_opencode = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+# tty feature 提供终端宽度探测与 unicode 显示宽度对齐 ——
+# 我们的路径全是中文/长路径，没有它表格会错位。
+comfy-table = { version = "8.0.1", features = ["tty"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 默认 features 带 cli，会拖进 ratatui/crossterm/tui-textarea/arboard/syntect
+# （那是 toon 自己交互式 TUI 编辑器的依赖），我们只要编解码库。
+toon-format = { version = "0.6.1", default-features = false }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+unicode-width = "0.2"

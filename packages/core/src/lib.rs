@@ -20,4 +20,6 @@ pub use model::{
     ContentBlock, DirectoryMeta, EntryKind, MessageBatch, MessageEntry, ProjectMeta, SessionMeta,
     UNKNOWN_PROJECT_PATH,
 };
-pub use source::{Archived, ProjectSelector, SessionFilter, SessionSource, SortKey, Subagents};
+pub use source::{
+    Archived, EmptySessions, ProjectSelector, SessionFilter, SessionSource, SortKey, Subagents,
+};

@@ -1,4 +1,4 @@
-# aa_session 常用命令（https://github.com/casey/just）
+# aa-session 常用命令（https://github.com/casey/just）
 # 用法：`just` 列出全部配方，`just <名字>` 执行。
 #
 # 两个容易踩的坑：
@@ -97,7 +97,7 @@ ci:
     cargo clippy --workspace --all-targets
     cargo test --workspace
 
-# 透传参数给二进制：just run -- sessions --limit 5
+# 透传参数给二进制：just run sessions --limit 5
 run *args:
     cargo run -q -p {{ cli_pkg }} -- {{ args }}
 
