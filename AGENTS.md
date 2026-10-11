@@ -268,7 +268,13 @@ agent 自行决定，准则如下：
 - **推送**：当工作已完整交付（各逻辑单元都已提交、ci 全绿）时，可自行 push 到
   `origin` 当前分支；半成品或重构中途的状态不 push。
   - 永远不 `--force`、不改写已推送的历史。
-  - 若尚未配置 remote，先 `git remote add origin <url>` 再 push。
+
+## 环境与可用工具
+
+- **remote**：`origin` = `git@github.com:Nahida-aa/aa_session.git`。
+- **`gh` CLI 已安装且已登录**（账号 `Nahida-aa`，git 协议 ssh）。
+  GitHub 相关操作（看/建 issue、PR、release、查远端状态等）直接跑 `gh`，
+  不需要网页或其他途径。
 
 ---
 
