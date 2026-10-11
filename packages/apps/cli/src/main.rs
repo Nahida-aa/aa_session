@@ -20,6 +20,7 @@ use aa_session_core::{
 use aa_session_source_opencode::OpencodeSource;
 use aa_session_source_opencode::export::{ExportOptions, build};
 use aa_session_source_opencode::{backup, rename};
+use aa_session_source_codebuddy::CodebuddySource;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -249,43 +250,62 @@ struct ExportArgs {
 
 /// 要操作的 agent 应用。
 ///
-/// 目前只实现了 opencode；将来加 Claude Code / Codex 时在这里加变体即可，
-/// 其余代码不需要改。
+/// 目前实现了 opencode 和 codebuddy；将来加 Claude Code / Codex 时在这里加变体即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AppArg {
     /// opencode（`~/.local/share/opencode/opencode.db`）。
     Opencode,
+    /// codebuddy（`~/.codebuddy/projects/<编码路径>/*.jsonl`）。
+    Codebuddy,
 }
 
 impl AppArg {
-    /// 该 app 的默认数据库路径。
-    fn default_db_path(self) -> PathBuf {
+    /// 该 app 的默认数据路径。
+    ///
+    /// opencode 是数据库文件，codebuddy 是目录（`~/.codebuddy`）。
+    fn default_data_path(self) -> PathBuf {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
         match self {
-            AppArg::Opencode => {
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
-                home.join(aa_session_source_opencode::DEFAULT_DATA_DIR)
-                    .join(aa_session_source_opencode::DB_FILE_NAME)
-            }
+            AppArg::Opencode => home
+                .join(aa_session_source_opencode::DEFAULT_DATA_DIR)
+                .join(aa_session_source_opencode::DB_FILE_NAME),
+            AppArg::Codebuddy => home.join(aa_session_source_codebuddy::DEFAULT_DATA_DIR),
         }
     }
 
     /// 按 `--app` 分派到对应的数据源实现。
     fn open(self, db: Option<&std::path::Path>) -> Result<Box<dyn SessionSource>> {
-        let path = db
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.default_db_path());
         match self {
-            AppArg::Opencode => Ok(Box::new(OpencodeSource::open(&path).with_context(
-                || {
-                    format!(
-                        "无法打开 {} 的数据库（路径 {}）",
-                        self.name(),
-                        path.display()
-                    )
-                },
-            )?)),
+            AppArg::Opencode => {
+                let path = db
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| self.default_data_path());
+                Ok(Box::new(OpencodeSource::open(&path).with_context(
+                    || {
+                        format!(
+                            "无法打开 {} 的数据库（路径 {}）",
+                            self.name(),
+                            path.display()
+                        )
+                    },
+                )?))
+            }
+            AppArg::Codebuddy => {
+                let path = db
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| self.default_data_path());
+                Ok(Box::new(CodebuddySource::open_dir(&path).with_context(
+                    || {
+                        format!(
+                            "无法打开 {} 的数据目录（路径 {}）",
+                            self.name(),
+                            path.display()
+                        )
+                    },
+                )?))
+            }
         }
     }
 
@@ -293,6 +313,7 @@ impl AppArg {
     fn name(self) -> &'static str {
         match self {
             AppArg::Opencode => "opencode",
+            AppArg::Codebuddy => "codebuddy",
         }
     }
 }
@@ -714,7 +735,7 @@ fn run_rename_project(
     // 做写入演练。默认值仍是 app 的标准位置。
     let db_path = db_override
         .cloned()
-        .unwrap_or_else(|| app.default_db_path());
+        .unwrap_or_else(|| app.default_data_path());
 
     // 预检用只读连接。
     let ro = OpencodeSource::open(&db_path)?;

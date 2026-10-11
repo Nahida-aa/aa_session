@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 aa_session_core = { workspace = true }
 aa_session_source_opencode = { workspace = true }
+aa_session_source_codebuddy = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 # tty feature 提供终端宽度探测与 unicode 显示宽度对齐 ——

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "packages/core",
+    "packages/sources/codebuddy",
     "packages/sources/opencode",
     "packages/apps/cli",
 ]
@@ -14,6 +15,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 aa_session_core = { path = "packages/core" }
 aa_session_source_opencode = { path = "packages/sources/opencode" }
+aa_session_source_codebuddy = { path = "packages/sources/codebuddy" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
