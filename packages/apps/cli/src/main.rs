@@ -18,7 +18,6 @@ use aa_session_core::{
     Subagents,
 };
 use aa_session_source_opencode::OpencodeSource;
-use aa_session_source_opencode::export::{ExportOptions, build};
 use aa_session_source_opencode::{backup, rename};
 use aa_session_source_codebuddy::CodebuddySource;
 use anyhow::{Context, Result};
@@ -203,18 +202,15 @@ enum Command {
         json: bool,
     },
 
-    /// 把一个会话导出为 JSON 到标准输出。
+    /// 把一个会话的全部原始数据导出为 JSON 到标准输出。
     ///
     /// 不带 `-o` 时写到 stdout，可直接管道给 `jq` 或重定向到文件。
     Show {
         /// 会话 id。
         session_id: String,
-
-        #[command(flatten)]
-        export: ExportArgs,
     },
 
-    /// 把一个会话导出为 JSON 文件。
+    /// 把一个会话的全部原始数据导出为 JSON 文件。
     Export {
         /// 会话 id。
         session_id: String,
@@ -226,26 +222,7 @@ enum Command {
         /// 覆盖已存在的输出文件。
         #[arg(short, long)]
         force: bool,
-
-        #[command(flatten)]
-        export: ExportArgs,
     },
-}
-
-/// `show` / `export` 共用的导出选项。
-#[derive(Debug, clap::Args)]
-struct ExportArgs {
-    /// 导出工具调用的 input / output。会让文件体积暴涨（单会话可达数百 MB）。
-    #[arg(long)]
-    with_tool_output: bool,
-
-    /// 导出助手的推理内容。
-    #[arg(long)]
-    with_reasoning: bool,
-
-    /// 每条工具输出最多保留多少字符（配合 `--with-tool-output`）。
-    #[arg(long, value_name = "N")]
-    max_tool_output: Option<usize>,
 }
 
 /// 要操作的 agent 应用。
@@ -546,9 +523,8 @@ fn main() -> Result<()> {
 
         Command::Show {
             session_id,
-            export: args,
         } => {
-            let file = assemble(source.as_ref(), &session_id, &args)?;
+            let file = assemble(source.as_ref(), &session_id)?;
             out(format_args!("{}", serde_json::to_string_pretty(&file)?));
         }
 
@@ -556,9 +532,8 @@ fn main() -> Result<()> {
             session_id,
             output: output_path,
             force,
-            export: args,
         } => {
-            let file = assemble(source.as_ref(), &session_id, &args)?;
+            let file = assemble(source.as_ref(), &session_id)?;
 
             let path = output_path.unwrap_or_else(|| PathBuf::from(format!("{session_id}.json")));
             if path.exists() && !force {
@@ -575,8 +550,7 @@ fn main() -> Result<()> {
             })?;
 
             out(format_args!(
-                "已导出 {} 条消息（{} 字节）→ {}",
-                file.messages.len(),
+                "已导出（{} 字节）→ {}",
                 text.len(),
                 path.display()
             ));
@@ -670,33 +644,18 @@ fn minutes_ago_ms(minutes: i64) -> i64 {
     now_ms - minutes * 60 * 1000
 }
 
-/// 取出会话 + 消息并组装成导出结构。
-fn assemble(
-    source: &dyn SessionSource,
-    session_id: &str,
-    args: &ExportArgs,
-) -> Result<aa_session_source_opencode::export::ExportFile> {
-    let session = source
-        .session(session_id)?
-        .ok_or_else(|| Error::NotFound(format!("session {session_id}")))?;
-
-    let batch = source.messages(session_id)?;
-
-    if batch.skipped > 0 {
-        tracing::warn!(
-            session = session_id,
-            skipped = batch.skipped,
-            "some messages had malformed json and were skipped"
-        );
-    }
-
-    let opts = ExportOptions {
-        with_tool_output: args.with_tool_output,
-        with_reasoning: args.with_reasoning,
-        max_tool_output_chars: args.max_tool_output,
-    };
-
-    Ok(build(&session, &batch, &opts))
+/// 导出该会话的**全部原始数据**（无损）。
+///
+/// 结果包一层 `{app, session_id, raw_data}`,`raw_data` 就是 source 的
+/// `dump()` 原样返回（opencode 是多张表,codebuddy 是 JSONL 事件流）。
+/// 用户的编辑器全文检索直接命中原始字符串,不做任何归一。
+fn assemble(source: &dyn SessionSource, session_id: &str) -> Result<serde_json::Value> {
+    let raw = source.dump(session_id)?;
+    Ok(serde_json::json!({
+        "app": source.app(),
+        "session_id": session_id,
+        "raw_data": raw,
+    }))
 }
 
 /// 改名子命令的实现。

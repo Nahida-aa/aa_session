@@ -121,104 +121,10 @@ impl SessionMeta {
     }
 }
 
-/// 一条消息在会话中的角色 / 种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EntryKind {
-    /// 用户输入。
-    User,
-    /// 助手回复。
-    Assistant,
-    /// 助手的思考过程。
-    Thought,
-    /// 工具调用。
-    ToolCall,
-    /// 上下文压缩摘要。
-    Compaction,
-    /// 框架自动生成的伪消息。
-    Synthetic,
-    /// 系统消息。
-    System,
-}
-
-impl EntryKind {
-    /// 该类型是否为人类可读内容（导出时决定是否折叠 tool 输出）。
-    pub fn is_readable(self) -> bool {
-        matches!(
-            self,
-            EntryKind::User
-                | EntryKind::Assistant
-                | EntryKind::Thought
-                | EntryKind::Compaction
-                | EntryKind::System
-        )
-    }
-}
-
-/// 消息内容的一个分块。
+/// 会话中的一条消息（原始数据，由各 source crate 自己定义字段）。
 ///
-/// 分层思想借鉴 ACP 的 `ContentBlock`，但这里是**持久化/导出模型**而非流式
-/// 协议模型 —— 不需要 `chunk` 增量语义。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    /// 纯文本。
-    Text(String),
-
-    /// 助手的思考内容。
-    Reasoning(String),
-
-    /// 工具调用。
-    ToolCall {
-        /// 工具调用 id。
-        id: String,
-        /// 工具名，如 `read` / `bash`。
-        name: String,
-        /// 状态，如 `completed` / `error` / `running`。
-        status: Option<String>,
-        /// 原始入参 JSON。
-        input: Option<serde_json::Value>,
-        /// 原始输出 JSON。
-        output: Option<serde_json::Value>,
-    },
-
-    /// 文件改动。
-    Diff {
-        /// 变更文件路径。
-        path: String,
-        /// unified diff 文本。
-        patch: String,
-    },
-
-    /// 上游新增了我们还不认识的块类型，原样保留 JSON 以免丢信息。
-    Other(serde_json::Value),
-}
-
-/// 会话中的一条消息。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MessageEntry {
-    /// 消息 id。
-    pub id: String,
-    /// 会话内的顺序号。
-    pub seq: i64,
-    /// 角色 / 种类。
-    pub kind: EntryKind,
-    /// 内容分块。
-    pub content: Vec<ContentBlock>,
-    /// 创建时间（Unix 毫秒）。
-    pub time_created: i64,
-}
-
-/// 一个会话的消息读取结果。
-///
-/// 单条消息损坏不该让整个会话作废，所以 source 层跳过坏行并在这里报数。
-#[derive(Debug, Clone)]
-pub struct MessageBatch {
-    /// 成功解析的消息，按 `seq` 升序。
-    pub entries: Vec<MessageEntry>,
-    /// 因 JSON 损坏被跳过的消息数。
-    pub skipped: usize,
-}
+/// 已删除：opencode/codebuddy 各自用 `serde_json::Value` 原样存原始数据，
+/// 不走统一抽象。`SessionMeta` 保留用于 `sessions` 列表命令（最小公约数）。
 
 #[cfg(test)]
 mod tests {

@@ -21,21 +21,15 @@
 //! 以 SQLite `mode=ro` URI 打开，**永不写入**。
 
 pub mod backup;
-pub mod blocks;
-pub mod export;
 pub mod rename;
-pub mod v1;
-pub mod v1_structs;
 
 use std::path::{Path, PathBuf};
 
 use aa_session_core::{
-    DirectoryMeta, Error, MessageBatch, MessageEntry, ProjectMeta, ProjectSelector, Result,
+    DirectoryMeta, Error, ProjectMeta, ProjectSelector, Result,
     SessionFilter, SessionMeta, SessionSource, SortKey,
 };
 use rusqlite::{Connection, OpenFlags, Row, params};
-
-use blocks::{entry_kind_from_type, parse_blocks};
 
 /// 默认的 opencode 数据目录（相对 `$HOME`）。
 pub const DEFAULT_DATA_DIR: &str = ".local/share/opencode";
@@ -155,6 +149,47 @@ impl OpencodeSource {
     /// 可写连接。**只有改名路径能用**。
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    /// 执行 `SELECT *` 查询，把每行（列名 + 值）原样构造成 JSON 对象。
+    ///
+    /// `data` 列等 TEXT 值保留为字符串（含内嵌 JSON 串），不做二次解析，
+    /// 保证无损。
+    fn dump_rows_by_sql(
+        &self,
+        sql: &str,
+        session_id: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        use rusqlite::types::ValueRef;
+
+        let mut stmt = self.conn().prepare(sql).map_err(query_err)?;
+        let col_names: Vec<String> =
+            stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt.query(params![session_id]).map_err(query_err)?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(query_err)? {
+            let mut obj = serde_json::Map::new();
+            for (i, name) in col_names.iter().enumerate() {
+                let vref = row.get_ref(i).map_err(query_err)?;
+                let val = match vref {
+                    ValueRef::Null => serde_json::Value::Null,
+                    ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
+                    ValueRef::Real(f) => serde_json::Value::Number(
+                        serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)),
+                    ),
+                    ValueRef::Text(b) => {
+                        serde_json::Value::String(String::from_utf8_lossy(b).to_string())
+                    }
+                    ValueRef::Blob(b) => {
+                        serde_json::Value::String(format!("{{hex: {}}}", hex::encode(b)))
+                    }
+                };
+                obj.insert(name.clone(), val);
+            }
+            out.push(serde_json::Value::Object(obj));
+        }
+        Ok(out)
     }
 
     /// 按 schema 分支构造 WHERE 子句。
@@ -357,31 +392,6 @@ fn order_by(sort: SortKey) -> &'static str {
     }
 }
 
-/// 把一行 `session_message` 读成 [`MessageEntry`]。
-fn message_from_row(row: &Row<'_>) -> Result<MessageEntry> {
-    let id: String = row.get(0).map_err(query_err)?;
-    let type_str: String = row.get(1).map_err(query_err)?;
-    let seq: i64 = row.get(2).map_err(query_err)?;
-    let time_created: i64 = row.get(3).map_err(query_err)?;
-    let data: String = row.get(4).map_err(query_err)?;
-
-    let kind = entry_kind_from_type(&type_str);
-
-    // 坏 JSON 报出 message id 和 type，便于定位。
-    let content = parse_blocks(kind, &data).map_err(|cause| Error::MalformedJson {
-        location: format!("message:{id} (type={type_str})"),
-        cause,
-    })?;
-
-    Ok(MessageEntry {
-        id,
-        seq,
-        kind,
-        content,
-        time_created,
-    })
-}
-
 impl SessionSource for OpencodeSource {
     fn app(&self) -> &'static str {
         APP_NAME
@@ -552,136 +562,46 @@ impl SessionSource for OpencodeSource {
             .next())
     }
 
-    /// 读取单个会话的全部消息，按 `seq` 升序。
+    /// 导出该会话的**全部原始数据**（无损）。
     ///
-    /// **先查 v2（`session_message`），没有再查 v1（`message` + `part` 两表）**，
-    /// 对调用方透明。坏 JSON 的消息被跳过并计入
-    /// [`MessageBatch::skipped`]，其余照常返回。
-    fn messages(&self, session_id: &str) -> Result<MessageBatch> {
-        let has_v2: i64 = self
-            .collect_rows(
-                "SELECT count(*) FROM session_message WHERE session_id = ?1",
-                &[&session_id],
-                |row| row.get(0).map_err(query_err),
-            )?
-            .pop()
-            .unwrap_or(0);
-
-        if has_v2 > 0 {
-            return read_v2_messages(self.conn(), session_id);
-        }
-
-        read_v1_messages(self.conn(), session_id)
-    }
-
-    fn message(&self, session_id: &str, seq: i64) -> Result<Option<MessageEntry>> {
-        let sql = "SELECT id, type, seq, time_created, data \
-                   FROM session_message WHERE session_id = ?1 AND seq = ?2";
-        let mut stmt = self.conn.prepare(sql).map_err(query_err)?;
-        let mut rows = stmt.query(params![session_id, seq]).map_err(query_err)?;
-
-        match rows.next().map_err(query_err)? {
-            Some(row) => Ok(Some(message_from_row(row)?)),
-            None => Ok(None),
-        }
-    }
-}
-
-
-/// 读 v2 消息（`session_message` 单表）。
-fn read_v2_messages(conn: &Connection, session_id: &str) -> Result<MessageBatch> {
-    use rusqlite::params;
-
-    let sql = "SELECT id, type, seq, time_created, data \
-               FROM session_message WHERE session_id = ?1 ORDER BY seq ASC";
-
-    let mut stmt = conn.prepare(sql).map_err(query_err)?;
-    let mut rows = stmt.query(params![session_id]).map_err(query_err)?;
-
-    let mut entries = Vec::new();
-    let mut skipped = 0usize;
-    while let Some(row) = rows.next().map_err(query_err)? {
-        match message_from_row(row) {
-            Ok(m) => entries.push(m),
-            Err(Error::MalformedJson { .. }) => skipped += 1,
-            Err(e) => return Err(e),
-        }
-    }
-
-    Ok(MessageBatch { entries, skipped })
-}
-
-/// 读 v1 消息（`message` 表存 role，`part` 表存正文，要拼回）。
-fn read_v1_messages(conn: &Connection, session_id: &str) -> Result<MessageBatch> {
-    use rusqlite::params;
-
-    // v1 里一条消息 = `message` 一行（role 在 data 里）+ 若干 `part` 行（正文）。
-    // 没有 `seq` 列，用 `time_created, id` 排序 + 枚举值做 seq。
-    let mut stmt = conn
-        .prepare("SELECT m.time_created, m.id, m.data \
-                  FROM message m WHERE m.session_id = ?1 \
-                  ORDER BY m.time_created ASC, m.id ASC")
-        .map_err(query_err)?;
-    let mut rows = stmt.query(params![session_id]).map_err(query_err)?;
-    let mut messages: Vec<(i64, String, String)> = Vec::new();
-    while let Some(row) = rows.next().map_err(query_err)? {
-        messages.push((
-            row.get(0).map_err(query_err)?,
-            row.get(1).map_err(query_err)?,
-            row.get(2).map_err(query_err)?,
-        ));
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT message_id, data FROM part WHERE session_id = ?1 \
-                  ORDER BY time_created ASC, id ASC")
-        .map_err(query_err)?;
-    let mut rows = stmt.query(params![session_id]).map_err(query_err)?;
-    let mut parts: Vec<(String, String)> = Vec::new();
-    while let Some(row) = rows.next().map_err(query_err)? {
-        parts.push((
-            row.get(0).map_err(query_err)?,
-            row.get(1).map_err(query_err)?,
-        ));
-    }
-
-    let mut by_message: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    for (message_id, data) in &parts {
-        by_message.entry(message_id.clone()).or_default().push(data.clone());
-    }
-
-    use crate::v1::build_v1_message;
-    use crate::v1_structs::V1MessageMeta;
-
-    let mut entries = Vec::new();
-    let mut skipped = 0usize;
-    for (seq, (time_created, message_id, data)) in messages.iter().enumerate() {
-        let role: String = match serde_json::from_str::<V1MessageMeta>(data) {
-            Ok(meta) => meta.role,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        let raw_parts: Vec<crate::v1_structs::PartBlock> = by_message
-            .get(message_id)
-            .map(|list| {
-                list.iter()
-                    .map(|s| crate::v1_structs::parse_part(s))
-                    .collect()
+    /// 查 `session_v2`（v1 兜底 `session`）+ `session_message` + `message`
+    /// + `part`，每张表的该会话所有行原样返回，`data` 列不解析（保留 JSON 串）。
+    ///
+    /// 返回的 JSON 对象含 `session` / `session_message` / `message` / `part` 四个字段。
+    fn dump(&self, session_id: &str) -> Result<serde_json::Value> {
+        // 会话行：v2 优先，查不到回落到 v1 `session` 表。
+        let session = self
+            .dump_rows_by_sql("SELECT * FROM session_v2 WHERE id = ?1", session_id)?
+            .into_iter()
+            .next()
+            .or_else(|| {
+                self.dump_rows_by_sql("SELECT * FROM session WHERE id = ?1", session_id)
+                    .ok()
+                    .and_then(|rows| rows.into_iter().next())
             })
-            .unwrap_or_default();
+            .ok_or_else(|| Error::NotFound(format!("session {session_id}")))?;
 
-        entries.push(build_v1_message(
-            seq as i64,
-            message_id,
-            *time_created,
-            &role,
-            &raw_parts,
-        ));
+        let session_messages = self.dump_rows_by_sql(
+            "SELECT * FROM session_message WHERE session_id = ?1 ORDER BY seq ASC",
+            session_id,
+        )?;
+        let v1_messages = self.dump_rows_by_sql(
+            "SELECT * FROM message WHERE session_id = ?1 \
+             ORDER BY time_created ASC, id ASC",
+            session_id,
+        )?;
+        let parts = self.dump_rows_by_sql(
+            "SELECT * FROM part WHERE session_id = ?1 \
+             ORDER BY time_created ASC, id ASC",
+            session_id,
+        )?;
+
+        Ok(serde_json::json!({
+            "session": session,
+            "session_message": session_messages,
+            "message": v1_messages,
+            "part": parts,
+        }))
     }
-
-    Ok(MessageBatch { entries, skipped })
 }
+

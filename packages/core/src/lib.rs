@@ -1,9 +1,9 @@
 //! 本地 agent 会话的领域模型与数据源抽象。
 //!
 //! 这一层不依赖任何具体 agent 的存储格式，也不依赖任何 UI 框架。
-//! 上层（CLI、将来的 GUI）只面向这里的 [`SessionMeta`] / [`ProjectMeta`] /
-//! [`MessageEntry`] 和 [`SessionSource`] trait 编程，具体格式由
-//! `aa_session_source-*` crate 负责。
+//! 上层（CLI、将来的 GUI）只面向这里的 [`SessionMeta`] / [`ProjectMeta`] 和
+//! [`SessionSource`] trait 编程。原始会话数据的导出由各 source crate 的
+//! `dump()` 方法直接返回 `serde_json::Value`（原样无损），不走统一抽象。
 //!
 //! # 关于 `app`
 //!
@@ -16,10 +16,7 @@ pub mod model;
 pub mod source;
 
 pub use error::{Error, Result};
-pub use model::{
-    ContentBlock, DirectoryMeta, EntryKind, MessageBatch, MessageEntry, ProjectMeta, SessionMeta,
-    UNKNOWN_PROJECT_PATH,
-};
+pub use model::{DirectoryMeta, ProjectMeta, SessionMeta, UNKNOWN_PROJECT_PATH};
 pub use source::{
     Archived, EmptySessions, ProjectSelector, SessionFilter, SessionSource, SortKey, Subagents,
 };

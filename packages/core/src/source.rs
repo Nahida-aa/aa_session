@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::model::{DirectoryMeta, MessageBatch, MessageEntry, ProjectMeta, SessionMeta};
+use crate::model::{DirectoryMeta, ProjectMeta, SessionMeta};
 
 /// 子 agent 会话的纳入方式。
 ///
@@ -222,11 +222,12 @@ pub trait SessionSource {
     /// 读取单个会话的元信息；不存在返回 `Ok(None)`。
     fn session(&self, session_id: &str) -> Result<Option<SessionMeta>>;
 
-    /// 读取单个会话的全部消息，按 `seq` 升序。
-    fn messages(&self, session_id: &str) -> Result<MessageBatch>;
-
-    /// 把单个消息读出来（供将来 fork 定位边界用）。
-    fn message(&self, session_id: &str, seq: i64) -> Result<Option<MessageEntry>>;
+    /// 导出该会话的**全部原始数据**（无损）。
+    ///
+    /// 返回 `serde_json::Value`，直接序列化该 app 里这条会话的所有原始记录
+    /// ——opencode 是 `session_v2` + `session_message` + `part` + `event`
+    /// 四张表；codebuddy 是整个 JSONL 文件的全部事件。不做任何归一。
+    fn dump(&self, session_id: &str) -> Result<serde_json::Value>;
 }
 
 #[cfg(test)]

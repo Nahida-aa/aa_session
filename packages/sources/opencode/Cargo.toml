@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 aa_session_core = { workspace = true }
 rusqlite = { workspace = true }
+hex = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

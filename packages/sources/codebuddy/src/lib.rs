@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aa_session_core::{
-    DirectoryMeta, Error, MessageBatch, MessageEntry, ProjectMeta, ProjectSelector, Result,
+    DirectoryMeta, Error, ProjectMeta, ProjectSelector, Result,
     SessionFilter, SessionMeta, SessionSource, SortKey,
 };
 
@@ -87,6 +87,30 @@ impl CodebuddySource {
         }
         Ok(files)
     }
+    /// 按 session_id 找到该会话的 JSONL 文件。
+    ///
+    /// session_id 等于文件名（去掉 `.jsonl`），先按文件名精确匹配。
+    fn find_session_file(&self, session_id: &str) -> Result<PathBuf> {
+        let projects_dir = self.projects_dir();
+        let entries = fs::read_dir(&projects_dir).map_err(|e| Error::Open {
+            path: projects_dir.display().to_string(),
+            cause: e.to_string(),
+        })?;
+
+        for proj in entries.flatten() {
+            let proj_dir = proj.path();
+            if !proj_dir.is_dir() {
+                continue;
+            }
+            let candidate = proj_dir.join(format!("{session_id}.jsonl"));
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+
+        Err(Error::NotFound(format!("session {session_id}")))
+    }
+
 }
 
 /// 读一个 JSONL 文件的全部事件（跳过空行与坏 JSON）。
@@ -231,61 +255,6 @@ fn summarize(
         cost: None,
         files_changed: 0,
         archived_at: None,
-    })
-}
-
-/// 把一条 `message` 事件转成 [`MessageEntry`]。
-fn message_from_event(ev: &serde_json::Value, seq: i64) -> Option<MessageEntry> {
-    let role = ev.get("role").and_then(|r| r.as_str())?;
-    let id = ev.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-    let time_created = ev.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
-    let content_array = ev.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-
-    use aa_session_core::ContentBlock;
-    let mut blocks: Vec<ContentBlock> = Vec::new();
-
-    for item in &content_array {
-        let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match item_type {
-            "input_text" | "output_text" => {
-                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                    blocks.push(ContentBlock::Text(text.to_string()));
-                }
-            }
-            "reasoning" => {
-                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                    blocks.push(ContentBlock::Reasoning(text.to_string()));
-                }
-            }
-            "tool_use" => {
-                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                let tool_id = item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                let input = item.get("input").cloned();
-                blocks.push(ContentBlock::ToolCall {
-                    id: tool_id,
-                    name,
-                    status: None,
-                    input,
-                    output: None,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    let kind = match role {
-        "user" => aa_session_core::EntryKind::User,
-        "assistant" => aa_session_core::EntryKind::Assistant,
-        _ => aa_session_core::EntryKind::System,
-    };
-
-    Some(MessageEntry {
-        id,
-        seq,
-        kind,
-        content: blocks,
-        time_created,
     })
 }
 
@@ -558,61 +527,28 @@ impl SessionSource for CodebuddySource {
         Ok(None)
     }
 
-    fn messages(&self, session_id: &str) -> Result<MessageBatch> {
-        let projects_dir = self.projects_dir();
-        if !projects_dir.exists() {
-            return Err(Error::NotFound(format!("session {session_id}")));
-        }
-
-        let mut file: Option<PathBuf> = None;
-        let proj_entries = match fs::read_dir(&projects_dir) {
-            Ok(entries) => entries.flatten().collect::<Vec<_>>(),
-            Err(e) => {
-                return Err(Error::Open {
-                    path: projects_dir.display().to_string(),
-                    cause: e.to_string(),
-                })
-            }
-        };
-        for proj in &proj_entries {
-            let proj_dir = proj.path();
-            if !proj_dir.is_dir() {
-                continue;
-            }
-            let candidate = proj_dir.join(format!("{session_id}.jsonl"));
-            if candidate.exists() {
-                file = Some(candidate);
-                break;
-            }
-        }
-
-        let file = file.ok_or_else(|| Error::NotFound(format!("session {session_id}")))?;
+    /// 导出该会话的**全部原始数据**（无损）。
+    ///
+    /// 读该会话的整个 JSONL 文件，每行事件原样进 `events` 数组，
+    /// 不解析、不挑事件类型。返回结构：
+    /// ```json
+    /// { "file": "<uuid>.jsonl", "events": [ ... 全部行 ... ] }
+    /// ```
+    fn dump(&self, session_id: &str) -> Result<serde_json::Value> {
+        let file = self.find_session_file(session_id)?;
         let events = read_events(&file)?;
+        let file_name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-        let mut entries: Vec<MessageEntry> = Vec::new();
-        let mut skipped = 0usize;
-        let mut seq = 0i64;
-
-        for ev in &events {
-            if ev.get("type").and_then(|t| t.as_str()) != Some("message") {
-                continue;
-            }
-            match message_from_event(ev, seq) {
-                Some(entry) => {
-                    entries.push(entry);
-                    seq += 1;
-                }
-                None => skipped += 1,
-            }
-        }
-
-        Ok(MessageBatch { entries, skipped })
+        Ok(serde_json::json!({
+            "file": file_name,
+            "events": events,
+        }))
     }
 
-    fn message(&self, session_id: &str, seq: i64) -> Result<Option<MessageEntry>> {
-        let batch = self.messages(session_id)?;
-        Ok(batch.entries.into_iter().find(|e| e.seq == seq))
-    }
+
 }
 
 /// 应用排序（简化版，不区分 tokens）。
