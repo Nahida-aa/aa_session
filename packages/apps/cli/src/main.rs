@@ -223,6 +223,15 @@ enum Command {
         #[arg(short, long)]
         force: bool,
     },
+
+    /// 查看该 app 的登录态（账号 + 凭据有效期）。
+    ///
+    /// token / api key 一律脱敏输出（只留前缀和长度），不会打印完整凭据。
+    Auth {
+        /// 输出格式：`table`（键值树，给人扫）/ `json` / `toon`。
+        #[arg(long, short = 'f', value_enum, default_value_t = Format::Table)]
+        format: Format,
+    },
 }
 
 /// 要操作的 agent 应用。
@@ -554,6 +563,11 @@ fn main() -> Result<()> {
                 text.len(),
                 path.display()
             ));
+        }
+
+        Command::Auth { format } => {
+            let info = source.auth()?;
+            output::print_auth(&info, format)?;
         }
     }
 

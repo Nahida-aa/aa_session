@@ -151,6 +151,58 @@ impl OpencodeSource {
         &mut self.conn
     }
 
+    /// 读取 opencode 的登录态（`~/.local/share/opencode/auth.json`）。
+    ///
+    /// 该文件是「provider → 凭据」的映射，两类形态：
+    /// - `{"type":"api","key":"sk-..."}` —— 各 provider 的 API key
+    /// - `{"type":"oauth","access":"…","refresh":"…","expires":…}` —— OAuth
+    ///
+    /// 所有密钥一律脱敏（前缀 + 长度），原文件就在 `auth_file` 里，需要原文
+    /// 自己 `cat`。文件不存在时 `status == "not_logged_in"`（正常状态）。
+    fn read_auth(&self) -> serde_json::Value {
+        let auth_file = self
+            .path
+            .parent()
+            .map(|d| d.join("auth.json"))
+            .unwrap_or_else(|| PathBuf::from("auth.json"));
+
+        let Ok(text) = std::fs::read_to_string(&auth_file) else {
+            return serde_json::json!({
+                "app": APP_NAME,
+                "status": "not_logged_in",
+                "auth_file": auth_file.display().to_string(),
+                "note": format!(
+                    "没有找到 {} —— 本机没有为 opencode 配置任何 provider 凭据。",
+                    auth_file.display()
+                ),
+            });
+        };
+
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return serde_json::json!({
+                "app": APP_NAME,
+                "status": "unreadable",
+                "auth_file": auth_file.display().to_string(),
+                "error": "auth.json 不是合法 JSON",
+            });
+        };
+
+        let mut providers = serde_json::Map::new();
+        if let Some(map) = parsed.as_object() {
+            for (name, cred) in map {
+                providers.insert(name.clone(), mask_credential(cred));
+            }
+        }
+
+        serde_json::json!({
+            "app": APP_NAME,
+            "status": if providers.is_empty() { "not_logged_in" } else { "logged_in" },
+            "auth_file": auth_file.display().to_string(),
+            "provider_count": providers.len(),
+            "providers": providers,
+        })
+    }
+
     /// 执行 `SELECT *` 查询，把每行（列名 + 值）原样构造成 JSON 对象。
     ///
     /// `data` 列等 TEXT 值保留为字符串（含内嵌 JSON 串），不做二次解析，
@@ -603,5 +655,126 @@ impl SessionSource for OpencodeSource {
             "part": parts,
         }))
     }
+
+    fn auth(&self) -> Result<serde_json::Value> {
+        Ok(self.read_auth())
+    }
 }
 
+///
+/// `api` 类型只留 key 前缀 + 长度；`oauth` 类型对 access / refresh 同样处理，
+/// 并把 `expires` 转成时效状态。未知形态原样带过（不含密钥的元信息字段）。
+fn mask_credential(cred: &serde_json::Value) -> serde_json::Value {
+    let Some(map) = cred.as_object() else {
+        return cred.clone();
+    };
+
+    let mut out = serde_json::Map::new();
+    for (k, v) in map {
+        match k.as_str() {
+            // 密钥字段：脱敏
+            "key" | "access" | "refresh" | "secret" | "token" => {
+                if let Some(s) = v.as_str() {
+                    out.insert(format!("{k}Masked"), serde_json::json!(mask_secret(s)));
+                    continue;
+                }
+                out.insert(k.clone(), v.clone());
+            }
+            // 时效字段：换算成天数
+            "expires" => {
+                if let Some(ms) = v.as_i64() {
+                    out.insert("expiresStatus".into(), serde_json::json!(expiry_status(ms)));
+                }
+                out.insert(k.clone(), v.clone());
+            }
+            _ => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// 密钥脱敏：前缀 + 长度。
+fn mask_secret(secret: &str) -> String {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.is_empty() {
+        return "(空)".to_string();
+    }
+    let head: String = chars.iter().take(8).collect();
+    format!("{head}…（{} 字符）", chars.len())
+}
+
+/// 由 Unix 毫秒到期时间算状态。
+fn expiry_status(expires_ms: i64) -> serde_json::Value {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let left_ms = expires_ms - now_ms;
+    let days_left = left_ms / 86_400_000;
+    let state = if left_ms <= 0 {
+        "expired"
+    } else if days_left <= 7 {
+        "expiring_soon"
+    } else {
+        "valid"
+    };
+    serde_json::json!({
+        "state": state,
+        "expires_at": expires_ms,
+        "days_left": days_left,
+    })
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn api_key_is_masked_not_passed_through() {
+        let cred = serde_json::json!({"type": "api", "key": "sk-1234567890abcdef"});
+        let masked = mask_credential(&cred);
+        let s = masked.to_string();
+        assert!(!s.contains("1234567890abcdef"), "原始 key 不得出现在输出里");
+        assert!(s.contains("sk-1234"));
+        assert!(s.contains("字符"));
+    }
+
+    #[test]
+    fn oauth_both_tokens_masked_with_expiry() {
+        let future = 1_800_000_000_000i64; // 远处
+        let cred = serde_json::json!({
+            "type": "oauth",
+            "refresh": "ref-abcdefghijklmnop",
+            "access": "acc-ABCDEFGHIJKLMNOP",
+            "expires": future,
+        });
+        let masked = mask_credential(&cred);
+        assert!(!masked.to_string().contains("abcdefghijklmnop"));
+        assert_eq!(masked["accessMasked"].as_str().unwrap().chars().count(), 8 + "…（20 字符）".chars().count());
+        assert_eq!(masked["refreshMasked"].as_str().unwrap().is_empty(), false);
+        assert_eq!(masked["expiresStatus"]["state"], "valid");
+    }
+
+    #[test]
+    fn expired_token_is_flagged() {
+        let past = 1_000i64;
+        let cred = serde_json::json!({"type": "oauth", "access": "x", "expires": past});
+        let masked = mask_credential(&cred);
+        assert_eq!(masked["expiresStatus"]["state"], "expired");
+    }
+
+    #[test]
+    fn unknown_credential_shape_passes_through() {
+        let cred = serde_json::json!({"type": "weird", "note": "no secret here"});
+        assert_eq!(mask_credential(&cred), cred);
+    }
+
+    #[test]
+    fn empty_secret_shows_placeholder() {
+        let cred = serde_json::json!({"type": "api", "key": ""});
+        let masked = mask_credential(&cred);
+        assert_eq!(masked["keyMasked"], "(空)");
+    }
+}

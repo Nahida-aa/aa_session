@@ -228,6 +228,23 @@ pub trait SessionSource {
     /// ——opencode 是 `session_v2` + `session_message` + `part` + `event`
     /// 四张表；codebuddy 是整个 JSONL 文件的全部事件。不做任何归一。
     fn dump(&self, session_id: &str) -> Result<serde_json::Value>;
+
+    /// 登录态信息（账号身份 + 凭据有效期）。
+    ///
+    /// 同样返回 `serde_json::Value` 并由各 app 自己组织字段，理由同
+    /// [`SessionSource::dump`]：不同 app 的登录态存储毫无共同结构
+    /// （opencode 是 `auth.json` 里的 provider 凭据，codebuddy 是
+    /// `CodeBuddyExtension` 的账号 + OAuth token）。
+    ///
+    /// # 脱敏约定（硬性）
+    ///
+    /// 返回值里的 **token / api key / secret 必须脱敏**（只留前缀与长度），
+    /// 不得出现完整凭据。本方法的结果可能被 `show`/管道/剪贴板带走，
+    /// 源文件就在 `credential_dir` 里，需要原文的用户自己 `cat`。
+    ///
+    /// 「本机没有登录过任何账号」是正常状态，返回 `Ok` 且
+    /// `status == "not_logged_in"`，不是错误。
+    fn auth(&self) -> Result<serde_json::Value>;
 }
 
 #[cfg(test)]

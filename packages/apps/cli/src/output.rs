@@ -240,3 +240,107 @@ pub fn print_sessions(rows: &[SessionMeta], fmt: Format) -> Result<()> {
 
 /// 标题列的宽度上限。
 const TITLE_W: usize = 40;
+
+/// 打印登录态。
+///
+/// `table` 格式走**通用键值树**打印：登录态是个嵌套对象而不是行集合，
+/// 硬套表格要么丢字段要么每列都空着一大半。树形打印对任何 app 的结构都成立，
+/// CLI 因此不含 per-app 的字段知识。
+/// `json` / `toon` 直接序列化整个对象（字段最全，给脚本和 AI 用）。
+pub fn print_auth(info: &serde_json::Value, fmt: Format) -> Result<()> {
+    if let Some(rendered) = fmt.render(info)? {
+        out(format_args!("{rendered}"));
+        return Ok(());
+    }
+
+    let app = info.get("app").and_then(|a| a.as_str()).unwrap_or("?");
+    let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+
+    let status_cn = match status {
+        "logged_in" => "已登录",
+        "not_logged_in" => "未登录",
+        "unreadable" => "凭据无法解析",
+        _ => status,
+    };
+    out(format_args!("{app} 登录状态：{status_cn}"));
+
+    print_tree(info, 1);
+    Ok(())
+}
+
+/// 递归打印 JSON 值；超过该深度的容器折叠成一行摘要。
+const MAX_DEPTH: usize = 6;
+/// 数组/对象超过这个元素个数就只打印个数（登录态里有几十个轮转凭据）。
+const MAX_ITEMS: usize = 12;
+
+fn print_tree(value: &serde_json::Value, depth: usize) {
+    use serde_json::Value;
+    let pad = "  ".repeat(depth);
+
+    match value {
+        Value::Object(map) => {
+            let keys: Vec<&String> = map.keys().collect();
+            for k in keys {
+                // app / status 已由表头说明，树里再重复一遍显得啰嗦。
+                if depth == 1 && (k == "app" || k == "status") {
+                    continue;
+                }
+                let v = &map[k];
+                let shown = preview(v);
+                out(format_args!("{pad}{k}：{shown}"));
+                if needs_recurse(v, depth) {
+                    print_tree(v, depth + 1);
+                }
+            }
+        }
+        Value::Array(items) => {
+            let shown = items.iter().take(MAX_ITEMS).count();
+            for (i, v) in items.iter().enumerate() {
+                if i >= MAX_ITEMS {
+                    let rest = items.len() - MAX_ITEMS;
+                    out(format_args!("{pad}…还有 {rest} 项"));
+                    break;
+                }
+                out(format_args!("{pad}[{i}] {}", preview(v)));
+                if needs_recurse(v, depth) {
+                    print_tree(v, depth + 1);
+                }
+            }
+            let _ = shown;
+        }
+        other => out(format_args!("{pad}{}", preview(other))),
+    }
+}
+
+/// 单行预览值：标量原样，容器显示「类型 + 规模」。
+fn preview(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::Null => "-".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => {
+            if s.is_empty() {
+                "(空)".to_string()
+            } else {
+                table::ellipsize_right(&s.replace('\n', " "), 60)
+            }
+        }
+        Value::Array(a) => format!("[{} 项]", a.len()),
+        Value::Object(m) => format!("{{{}}} 个字段", m.len()),
+    }
+}
+
+/// 该值是否值得展开下一层。
+fn needs_recurse(v: &serde_json::Value, depth: usize) -> bool {
+    use serde_json::Value;
+    if depth >= MAX_DEPTH {
+        return false;
+    }
+    match v {
+        Value::Object(m) => !m.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        _ => false,
+    }
+}
+

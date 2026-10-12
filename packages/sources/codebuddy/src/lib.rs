@@ -19,6 +19,10 @@ use aa_session_core::{
     SessionFilter, SessionMeta, SessionSource, SortKey,
 };
 
+pub mod auth;
+
+use auth::{mask_phone, mask_token};
+
 pub const APP_NAME: &str = "codebuddy";
 pub const DEFAULT_DATA_DIR: &str = ".codebuddy";
 pub const PROJECTS_DIR: &str = "projects";
@@ -548,8 +552,201 @@ impl SessionSource for CodebuddySource {
         }))
     }
 
-
+    fn auth(&self) -> Result<serde_json::Value> {
+        Ok(self.read_auth())
+    }
 }
+
+impl CodebuddySource {
+    /// 读取 codebuddy 的登录态。
+    ///
+    /// 三个来源：
+    /// 1. 凭据目录下**当前生效**的 `<app>.info`（账号 + access/refresh token）
+    /// 2. 同目录的轮转副本数量（反映登录/刷新的历史）
+    /// 3. `~/.codebuddy/local_storage/` 里的服务端账号配置（userId / 模型 / 额度）
+    ///
+    /// token 一律脱敏（见 [`auth::mask_token`]），不返回完整凭据。
+    fn read_auth(&self) -> serde_json::Value {
+        let dir = auth::auth_dir();
+        let Ok(apps) = auth::scan(&dir) else {
+            // 目录不存在 = 本机从没登录过。这是正常状态，不是错误。
+            return serde_json::json!({
+                "app": APP_NAME,
+                "status": "not_logged_in",
+                "credential_dir": dir.display().to_string(),
+                "note": "没有找到 CodeBuddyExtension 凭据目录（~/.local/share/CodeBuddyExtension/Data/Public/auth），本机未登录过 codebuddy。",
+            });
+        };
+
+        // 只把**当前生效**的凭据展开成完整字段；历史轮转副本给计数就够 ——
+        // 实测有 83 个，逐个展开会把真正要看的当前凭据淹掉。
+        let mut credentials: Vec<serde_json::Value> = Vec::new();
+        let mut rotated_total = 0usize;
+        for app in &apps {
+            rotated_total += app.rotated.len();
+            if let Some(file) = &app.current {
+                credentials.push(read_credential_file(file, &app.app, true));
+            }
+        }
+
+        let account_config = read_account_config(self);
+        let logged_in = !credentials.is_empty();
+
+        serde_json::json!({
+            "app": APP_NAME,
+            "status": if logged_in { "logged_in" } else { "not_logged_in" },
+            "credential_dir": dir.display().to_string(),
+            "credential_count": credentials.len(),
+            "credentials": credentials,
+            "rotated_file_count": rotated_total,
+            "account_config": account_config,
+        })
+    }
+
+    /// 读 `~/.codebuddy/local_storage/` 下的全部条目（原样 JSON）。
+    fn local_storage_entries(&self) -> Vec<serde_json::Value> {
+        let dir = self.root.join("local_storage");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // 坏条目（不是合法 JSON / 读不到）跳过，不影响其他条目。
+            if path.extension().map(|e| e == "info").unwrap_or(false)
+                && path.is_file()
+                && let Ok(text) = fs::read_to_string(&path)
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            {
+                out.push(v);
+            }
+        }
+        out
+    }
+}
+
+/// 读单个凭据文件。
+///
+/// `is_current` 为 false 时只统计元信息（账号 uid + 文件时间），不解析 token
+/// —— 几十个历史副本逐个解 JWT 没意义。
+fn read_credential_file(file: &Path, app_name: &str, is_current: bool) -> serde_json::Value {
+    let raw = match fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) => {
+            return serde_json::json!({
+                "file": file.display().to_string(),
+                "current": is_current,
+                "error": e.to_string(),
+            });
+        }
+    };
+
+    let file_name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mtime = fs::metadata(file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let mut out = serde_json::json!({
+        "app": app_name,
+        "file": file_name,
+        "file_path": file.display().to_string(),
+        "current": is_current,
+        "file_mtime": mtime,
+    });
+
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        out["error"] = serde_json::json!("凭据文件不是合法 JSON");
+        return out;
+    };
+
+    if let Some(account) = parsed.get("account") {
+        let mut acc = account.clone();
+        // 手机号脱敏；其余账号字段是身份信息，保留原值。
+        if let Some(phone) = acc.get("phoneNumber").and_then(|p| p.as_str()) {
+            acc["phoneNumberMasked"] = serde_json::json!(mask_phone(phone));
+            acc.as_object_mut().map(|o| o.remove("phoneNumber"));
+        }
+        out["account"] = acc;
+    }
+
+    if let Some(auth) = parsed.get("auth") {
+        let mut a = auth.clone();
+        for key in ["accessToken", "refreshToken"] {
+            if let Some(tok) = a.get(key).and_then(|t| t.as_str()) {
+                let masked_key = format!("{key}Masked");
+                a[masked_key.as_str()] = serde_json::json!(mask_token(tok));
+                a.as_object_mut().map(|o| o.remove(key));
+            }
+        }
+        a["status"] = serde_json::json!(token_status(a.get("expiresAt")));
+        out["auth"] = a;
+    }
+
+    if let Some(accounts) = parsed.get("accounts").and_then(|a| a.as_array()) {
+        out["stored_account_count"] = serde_json::json!(accounts.len());
+    }
+
+    out
+}
+
+/// 由 `expiresAt`（Unix 毫秒）算出 token 时效状态。
+fn token_status(expires_at: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(exp) = expires_at.and_then(|e| e.as_i64()) else {
+        return serde_json::json!({"state": "unknown", "note": "凭据里没有 expiresAt"});
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let left_ms = exp - now_ms;
+    let days_left = left_ms / 86_400_000;
+
+    let state = if left_ms <= 0 {
+        "expired"
+    } else if days_left <= 7 {
+        "expiring_soon"
+    } else {
+        "valid"
+    };
+
+    serde_json::json!({
+        "state": state,
+        "expires_at": exp,
+        "days_left": days_left,
+    })
+}
+
+/// 从 `~/.codebuddy/local_storage/` 里捞服务端账号配置。
+///
+/// 实测带 `userId` 的条目（`entry_d43e9699….info`）就是账号配置：
+/// `userId` / `enterpriseId` / `models`（含额度）/ `productFeatures`。
+fn read_account_config(source: &CodebuddySource) -> Option<serde_json::Value> {
+    let entries = source.local_storage_entries();
+    // 条目顶层是**数组**（`[{userId, data, ts}]`），不是对象；
+    // 也有少数条目直接是对象。两种都找一遍。
+    entries
+        .iter()
+        .flat_map(|v| match v {
+            serde_json::Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
+        })
+        .find(|item| item.get("userId").is_some())
+        .map(|mut v| {
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("ts");
+            }
+            v
+        })
+}
+
 
 /// 应用排序（简化版，不区分 tokens）。
 fn apply_sort(out: &mut [SessionMeta], sort: SortKey) {
