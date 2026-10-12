@@ -236,15 +236,18 @@ pub trait SessionSource {
     /// （opencode 是 `auth.json` 里的 provider 凭据，codebuddy 是
     /// `CodeBuddyExtension` 的账号 + OAuth token）。
     ///
-    /// # 脱敏约定（硬性）
+    /// # `show_secrets`
     ///
-    /// 返回值里的 **token / api key / secret 必须脱敏**（只留前缀与长度），
-    /// 不得出现完整凭据。本方法的结果可能被 `show`/管道/剪贴板带走，
-    /// 源文件就在 `credential_dir` 里，需要原文的用户自己 `cat`。
+    /// `false`（默认）：**token / api key / secret 必须脱敏**（只留前缀与
+    /// 长度），不得出现完整凭据。本方法的结果可能被管道、剪贴板、issue
+    /// 报告带走，脱敏是硬性约定。
+    ///
+    /// `true`：输出完整凭据。只在用户显式要求（排查认证问题）时传 `true`，
+    /// 调用方应在屏幕上给出警告。
     ///
     /// 「本机没有登录过任何账号」是正常状态，返回 `Ok` 且
     /// `status == "not_logged_in"`，不是错误。
-    fn auth(&self) -> Result<serde_json::Value>;
+    fn auth(&self, show_secrets: bool) -> Result<serde_json::Value>;
 }
 
 #[cfg(test)]

@@ -247,10 +247,21 @@ const TITLE_W: usize = 40;
 /// 硬套表格要么丢字段要么每列都空着一大半。树形打印对任何 app 的结构都成立，
 /// CLI 因此不含 per-app 的字段知识。
 /// `json` / `toon` 直接序列化整个对象（字段最全，给脚本和 AI 用）。
-pub fn print_auth(info: &serde_json::Value, fmt: Format) -> Result<()> {
+pub fn print_auth(
+    info: &serde_json::Value,
+    fmt: Format,
+    show_secrets: bool,
+) -> Result<()> {
     if let Some(rendered) = fmt.render(info)? {
         out(format_args!("{rendered}"));
         return Ok(());
+    }
+
+    if show_secrets {
+        // 明码凭据上屏，先在屏幕和 stderr 各留一句警告。
+        // 用户可能正把 stdout 重定向进文件或管道给 AI，那句提醒更值钱。
+        eprintln!("⚠ 正在打印完整凭据（token / api key）。不要把它粘到 issue、日志或聊天里。");
+        eprintln!("⚠ 凭据原文在 {} 里，日常查看不需要 --show-secrets。", credential_dir_hint(info));
     }
 
     let app = info.get("app").and_then(|a| a.as_str()).unwrap_or("?");
@@ -266,6 +277,15 @@ pub fn print_auth(info: &serde_json::Value, fmt: Format) -> Result<()> {
 
     print_tree(info, 1);
     Ok(())
+}
+
+/// 从 auth 结果里取凭据文件路径，用于警告文案；取不到返回占位。
+fn credential_dir_hint(info: &serde_json::Value) -> String {
+    info.get("credential_dir")
+        .or_else(|| info.get("auth_file"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("凭据文件")
+        .to_string()
 }
 
 /// 递归打印 JSON 值；超过该深度的容器折叠成一行摘要。

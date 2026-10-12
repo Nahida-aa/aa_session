@@ -226,11 +226,16 @@ enum Command {
 
     /// 查看该 app 的登录态（账号 + 凭据有效期）。
     ///
-    /// token / api key 一律脱敏输出（只留前缀和长度），不会打印完整凭据。
+    /// token / api key 默认脱敏输出（只留前缀和长度）。`--show-secrets`
+    /// 才会打印完整凭据 —— 仅在排查认证问题时用，别把输出粘到 issue 里。
     Auth {
         /// 输出格式：`table`（键值树，给人扫）/ `json` / `toon`。
         #[arg(long, short = 'f', value_enum, default_value_t = Format::Table)]
         format: Format,
+
+        /// 打印完整 token / api key（默认脱敏）。输出可能被管道或剪贴板带走。
+        #[arg(long, short = 's')]
+        show_secrets: bool,
     },
 }
 
@@ -565,9 +570,12 @@ fn main() -> Result<()> {
             ));
         }
 
-        Command::Auth { format } => {
-            let info = source.auth()?;
-            output::print_auth(&info, format)?;
+        Command::Auth {
+            format,
+            show_secrets,
+        } => {
+            let info = source.auth(show_secrets)?;
+            output::print_auth(&info, format, show_secrets)?;
         }
     }
 

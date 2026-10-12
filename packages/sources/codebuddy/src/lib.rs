@@ -552,8 +552,8 @@ impl SessionSource for CodebuddySource {
         }))
     }
 
-    fn auth(&self) -> Result<serde_json::Value> {
-        Ok(self.read_auth())
+    fn auth(&self, show_secrets: bool) -> Result<serde_json::Value> {
+        Ok(self.read_auth(show_secrets))
     }
 }
 
@@ -566,7 +566,7 @@ impl CodebuddySource {
     /// 3. `~/.codebuddy/local_storage/` 里的服务端账号配置（userId / 模型 / 额度）
     ///
     /// token 一律脱敏（见 [`auth::mask_token`]），不返回完整凭据。
-    fn read_auth(&self) -> serde_json::Value {
+    fn read_auth(&self, show_secrets: bool) -> serde_json::Value {
         let dir = auth::auth_dir();
         let Ok(apps) = auth::scan(&dir) else {
             // 目录不存在 = 本机从没登录过。这是正常状态，不是错误。
@@ -585,7 +585,7 @@ impl CodebuddySource {
         for app in &apps {
             rotated_total += app.rotated.len();
             if let Some(file) = &app.current {
-                credentials.push(read_credential_file(file, &app.app, true));
+                credentials.push(read_credential_file(file, &app.app, true, show_secrets));
             }
         }
 
@@ -630,7 +630,12 @@ impl CodebuddySource {
 ///
 /// `is_current` 为 false 时只统计元信息（账号 uid + 文件时间），不解析 token
 /// —— 几十个历史副本逐个解 JWT 没意义。
-fn read_credential_file(file: &Path, app_name: &str, is_current: bool) -> serde_json::Value {
+fn read_credential_file(
+    file: &Path,
+    app_name: &str,
+    is_current: bool,
+    show_secrets: bool,
+) -> serde_json::Value {
     let raw = match fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -670,7 +675,12 @@ fn read_credential_file(file: &Path, app_name: &str, is_current: bool) -> serde_
         let mut acc = account.clone();
         // 手机号脱敏；其余账号字段是身份信息，保留原值。
         if let Some(phone) = acc.get("phoneNumber").and_then(|p| p.as_str()) {
-            acc["phoneNumberMasked"] = serde_json::json!(mask_phone(phone));
+            let shown = if show_secrets {
+                phone.to_string()
+            } else {
+                mask_phone(phone)
+            };
+            acc["phoneNumberShown"] = serde_json::json!(shown);
             acc.as_object_mut().map(|o| o.remove("phoneNumber"));
         }
         out["account"] = acc;
@@ -680,9 +690,17 @@ fn read_credential_file(file: &Path, app_name: &str, is_current: bool) -> serde_
         let mut a = auth.clone();
         for key in ["accessToken", "refreshToken"] {
             if let Some(tok) = a.get(key).and_then(|t| t.as_str()) {
-                let masked_key = format!("{key}Masked");
-                a[masked_key.as_str()] = serde_json::json!(mask_token(tok));
-                a.as_object_mut().map(|o| o.remove(key));
+                // show_secrets 时保留原字段名与原文，脱敏时加 Masked 后缀。
+                let shown = mask_token(tok, show_secrets);
+                let target_key = if show_secrets {
+                    key.to_string()
+                } else {
+                    format!("{key}Masked")
+                };
+                a[target_key.as_str()] = serde_json::json!(shown);
+                if !show_secrets {
+                    a.as_object_mut().map(|o| o.remove(key));
+                }
             }
         }
         a["status"] = serde_json::json!(token_status(a.get("expiresAt")));

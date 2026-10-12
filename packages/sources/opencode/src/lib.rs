@@ -159,7 +159,7 @@ impl OpencodeSource {
     ///
     /// 所有密钥一律脱敏（前缀 + 长度），原文件就在 `auth_file` 里，需要原文
     /// 自己 `cat`。文件不存在时 `status == "not_logged_in"`（正常状态）。
-    fn read_auth(&self) -> serde_json::Value {
+    fn read_auth(&self, show_secrets: bool) -> serde_json::Value {
         let auth_file = self
             .path
             .parent()
@@ -190,7 +190,7 @@ impl OpencodeSource {
         let mut providers = serde_json::Map::new();
         if let Some(map) = parsed.as_object() {
             for (name, cred) in map {
-                providers.insert(name.clone(), mask_credential(cred));
+                providers.insert(name.clone(), mask_credential(cred, show_secrets));
             }
         }
 
@@ -656,15 +656,15 @@ impl SessionSource for OpencodeSource {
         }))
     }
 
-    fn auth(&self) -> Result<serde_json::Value> {
-        Ok(self.read_auth())
+    fn auth(&self, show_secrets: bool) -> Result<serde_json::Value> {
+        Ok(self.read_auth(show_secrets))
     }
 }
 
 ///
 /// `api` 类型只留 key 前缀 + 长度；`oauth` 类型对 access / refresh 同样处理，
 /// 并把 `expires` 转成时效状态。未知形态原样带过（不含密钥的元信息字段）。
-fn mask_credential(cred: &serde_json::Value) -> serde_json::Value {
+fn mask_credential(cred: &serde_json::Value, show_secrets: bool) -> serde_json::Value {
     let Some(map) = cred.as_object() else {
         return cred.clone();
     };
@@ -675,7 +675,13 @@ fn mask_credential(cred: &serde_json::Value) -> serde_json::Value {
             // 密钥字段：脱敏
             "key" | "access" | "refresh" | "secret" | "token" => {
                 if let Some(s) = v.as_str() {
-                    out.insert(format!("{k}Masked"), serde_json::json!(mask_secret(s)));
+                    // show_secrets 时保留原字段名与原文，脱敏时加 Masked 后缀。
+                    let (target, shown) = if show_secrets {
+                        (k.clone(), s.to_string())
+                    } else {
+                        (format!("{k}Masked"), mask_secret(s))
+                    };
+                    out.insert(target, serde_json::json!(shown));
                     continue;
                 }
                 out.insert(k.clone(), v.clone());
@@ -734,7 +740,7 @@ mod auth_tests {
     #[test]
     fn api_key_is_masked_not_passed_through() {
         let cred = serde_json::json!({"type": "api", "key": "sk-1234567890abcdef"});
-        let masked = mask_credential(&cred);
+        let masked = mask_credential(&cred, false);
         let s = masked.to_string();
         assert!(!s.contains("1234567890abcdef"), "原始 key 不得出现在输出里");
         assert!(s.contains("sk-1234"));
@@ -750,7 +756,7 @@ mod auth_tests {
             "access": "acc-ABCDEFGHIJKLMNOP",
             "expires": future,
         });
-        let masked = mask_credential(&cred);
+        let masked = mask_credential(&cred, false);
         assert!(!masked.to_string().contains("abcdefghijklmnop"));
         assert_eq!(masked["accessMasked"].as_str().unwrap().chars().count(), 8 + "…（20 字符）".chars().count());
         assert_eq!(masked["refreshMasked"].as_str().unwrap().is_empty(), false);
@@ -761,20 +767,30 @@ mod auth_tests {
     fn expired_token_is_flagged() {
         let past = 1_000i64;
         let cred = serde_json::json!({"type": "oauth", "access": "x", "expires": past});
-        let masked = mask_credential(&cred);
+        let masked = mask_credential(&cred, false);
         assert_eq!(masked["expiresStatus"]["state"], "expired");
     }
 
     #[test]
     fn unknown_credential_shape_passes_through() {
         let cred = serde_json::json!({"type": "weird", "note": "no secret here"});
-        assert_eq!(mask_credential(&cred), cred);
+        assert_eq!(mask_credential(&cred, false), cred);
+        assert_eq!(mask_credential(&cred, true), cred);
+    }
+
+    #[test]
+    fn show_secrets_keeps_original_key_and_field_name() {
+        let cred = serde_json::json!({"type": "api", "key": "sk-1234567890abcdef"});
+        let raw = mask_credential(&cred, true);
+        // 原文 + 原字段名，不加 Masked 后缀
+        assert_eq!(raw["key"], "sk-1234567890abcdef");
+        assert!(raw.get("keyMasked").is_none());
     }
 
     #[test]
     fn empty_secret_shows_placeholder() {
         let cred = serde_json::json!({"type": "api", "key": ""});
-        let masked = mask_credential(&cred);
+        let masked = mask_credential(&cred, false);
         assert_eq!(masked["keyMasked"], "(空)");
     }
 }

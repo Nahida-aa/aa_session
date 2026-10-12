@@ -44,7 +44,13 @@ pub fn auth_dir() -> PathBuf {
 ///
 /// 前 12 字符足够让用户区分「这是 access 还是 refresh」以及是否为空，
 /// 又不至于把可用的凭据泄露到终端/日志/issue 里。
-pub fn mask_token(token: &str) -> String {
+///
+/// `show_secrets = true` 时原样返回 —— 调用方（CLI `--show-secrets`）必须
+/// 已经给过用户警告。
+pub fn mask_token(token: &str, show_secrets: bool) -> String {
+    if show_secrets {
+        return token.to_string();
+    }
     let chars: Vec<char> = token.chars().collect();
     if chars.is_empty() {
         return "(空)".to_string();
@@ -162,7 +168,7 @@ mod tests {
     #[test]
     fn mask_token_shows_prefix_and_length_only() {
         let tok = "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwi.verylongrest";
-        let m = mask_token(tok);
+        let m = mask_token(tok, false);
         assert!(m.starts_with("eyJhbGciOi"));
         // 长度按字符数，不泄露全串
         assert!(m.ends_with(&format!("（{} 字符）", tok.chars().count())));
@@ -171,9 +177,17 @@ mod tests {
 
     #[test]
     fn mask_token_handles_multibyte_and_empty() {
-        assert_eq!(mask_token(""), "(空)");
+        assert_eq!(mask_token("", false), "(空)");
         // 中文字符数而非字节数
-        assert!(mask_token("你好世界啊").contains("（5 字符）"));
+        assert!(mask_token("你好世界啊", false).contains("（5 字符）"));
+    }
+
+    #[test]
+    fn show_secrets_returns_the_raw_token() {
+        let tok = "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwi.verylongrest";
+        assert_eq!(mask_token(tok, true), tok);
+        // 一个字符都不能少
+        assert_eq!(mask_token("", true), "");
     }
 
     #[test]
